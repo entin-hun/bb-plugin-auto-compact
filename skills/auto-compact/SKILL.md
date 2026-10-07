@@ -11,8 +11,12 @@ automatically once usage reaches a configurable percentage (default 80%).
 ## How it works
 
 - When a thread goes idle or fails, the plugin reads its `contextWindowUsage`
-  (used tokens vs. model window) and calls `threads.compact` if usage is at
-  or above the threshold.
+  (used tokens vs. model window) and compacts if usage is at or above the
+  threshold. Hermes ACP threads receive Hermes' `/compress` command through
+  the ACP session; other providers use BB's native `threads.compact` API.
+- Hermes verification parses the explicit `Context compressed: old -> new`
+  response and rejects a no-op. BB may still show the original transcript
+  size because ACP compression is owned by the provider.
 - A 15-minute per-thread cooldown prevents repeated compactions when usage
   stays high.
 - Compaction only ever runs on idle or failed threads, which is when BB
@@ -33,12 +37,14 @@ bb auto-compact now [thread-id] [--json]
   over threshold. Use it to verify behavior instead of waiting for a thread
   to go idle.
 - `now` compacts immediately, bypassing threshold and cooldown. Same action
-  as the thread header's Compact button.
+  as the thread header's Compact button. For Hermes ACP, it queues `/compress`
+  and returns immediately; verification continues in the background so a
+  remote BB request is not held open while Hermes finishes its turn.
 
 ## Manual compaction
 
 Every thread header has a **Compact** button (added by this plugin) that
-compacts the visible thread on demand, with a toast confirming the result.
+requests compaction of the visible thread, with a toast confirming dispatch.
 It works even when the thread is below the auto-compact threshold or when
 auto-compact is disabled. The button shows the thread's live context usage
 next to the label (turning red at the threshold) and a spinner while a
@@ -49,7 +55,9 @@ compaction runs.
 Some providers cannot compact at all (certain ACP bridges fail with
 "<provider> does not support manual compaction"). On those threads the
 Compact button says the provider doesn't support compaction, and automatic
-checks skip quietly instead of retrying on every idle event.
+checks skip quietly instead of retrying on every idle event. Hermes ACP is
+supported by sending its documented `/compress` command into the existing
+session.
 
 ## Settings
 

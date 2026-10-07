@@ -218,6 +218,50 @@ describe("providers without compaction support", () => {
 });
 
 describe("manual compaction", () => {
+  it("uses Hermes ACP's /compress command", async () => {
+    const sendInputs: unknown[] = [];
+    let usedTokens = 10_000;
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "auto-compact",
+      sdk: {
+        threads: {
+          timeline: async () => timelineWith(usedTokens, 200_000),
+          get: async () => ({ providerId: "acp-hermes-agent" }),
+          send: async (args: { input: unknown[] }) => {
+            sendInputs.push(...args.input);
+            usedTokens = 1_000;
+            return { ok: true as const, delivery: "sent" as const };
+          },
+          wait: async () => ({
+            matched: true as const,
+            threadId: THREAD_ID,
+            target: { kind: "status" as const, status: "idle" as const },
+            thread: { providerId: "acp-hermes-agent" },
+          }),
+          output: async () => ({
+            output: "Context compressed: 10 -> 3 messages\n~10,000 -> ~1,000 tokens",
+          }),
+        },
+      },
+    });
+    await plugin(bb);
+    const result = await harness.behavior.callRpc("compact_now", {
+      threadId: THREAD_ID,
+    });
+    expect(result).toEqual({
+      result: "started: Hermes /compress queued; verification pending",
+    });
+    expect(sendInputs).toEqual([
+      {
+        type: "text",
+        text: "/compress",
+        mentions: [],
+        visibility: "agent-only",
+      },
+    ]);
+    await harness.lifecycle.dispose();
+  });
+
   it("compact_now RPC compacts regardless of threshold", async () => {
     const { harness, compactCalls } = await loadHost(10_000);
     const result = await harness.behavior.callRpc("compact_now", {

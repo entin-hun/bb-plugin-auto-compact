@@ -4,9 +4,9 @@
 // How it works: BB reports per-thread context usage on the thread timeline
 // (`contextWindowUsage`: used tokens vs. model window). When a thread goes
 // idle or fails — exactly the states where BB allows compaction — this plugin
-// reads that usage and calls `threads.compact` once it meets the threshold.
-// A per-thread cooldown keeps a thread whose usage stays high from being
-// compacted on every single idle event.
+// reads that usage and compacts once it meets the threshold. Hermes ACP is
+// provider-owned, so its `/compress` response is used to verify the result;
+// other providers use BB's native compaction API.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
@@ -14,6 +14,10 @@ import { z } from "zod";
 const COOLDOWN_MS = 15 * 60_000;
 const LAST_COMPACT_KV_PREFIX = "last-compact:";
 const UNSUPPORTED_KV_PREFIX = "unsupported-compact:";
+const HERMES_PROVIDER_ID = "acp-hermes-agent";
+const HERMES_COMPRESSION_TIMEOUT_MS = 30_000;
+const HERMES_RESULT_RE =
+  /Context compressed:\s*([\d,]+)\s*->\s*([\d,]+) messages[\s\S]*?~([\d,]+)\s*->\s*~([\d,]+) tokens/i;
 
 /** Percentage of `window` consumed by `used`, or null when unmeasurable. */
 export function usagePercent(
@@ -42,6 +46,10 @@ function errorMessage(error: unknown): string {
  */
 function isUnsupportedCompaction(error: unknown): boolean {
   return /does not support .*compaction/i.test(errorMessage(error));
+}
+
+function isHermesProvider(providerId: string | null | undefined): boolean {
+  return providerId === HERMES_PROVIDER_ID;
 }
 
 // RPC contract for the thread-header Compact button (app.tsx imports only
@@ -115,7 +123,95 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function checkThread(threadId: string, trigger: string): Promise<string> {
+  async function compactThread(
+    threadId: string,
+    providerId: string | null | undefined,
+    waitForVerification = true,
+  ): Promise<void> {
+    if (isHermesProvider(providerId)) {
+      // Hermes exposes compression as the `/compress` command inside its ACP
+      // session. Keep this agent-only so the command is not shown as a user
+      // message in the BB transcript.
+      await bb.sdk.threads.send({
+        threadId,
+        mode: "auto",
+        input: [
+          {
+            type: "text",
+            text: "/compress",
+            mentions: [],
+            visibility: "agent-only",
+          },
+        ],
+      });
+
+      const verify = async (): Promise<void> => {
+        // `threads.send` only acknowledges dispatch. Wait for Hermes to finish
+        // the command, then verify Hermes' explicit compression result. BB's
+        // timeline may retain the original transcript size for ACP sessions.
+        await bb.sdk.threads.wait({
+          threadId,
+          status: "idle",
+          timeoutMs: HERMES_COMPRESSION_TIMEOUT_MS,
+        });
+        const { output } = await bb.sdk.threads.output({ threadId });
+        const match = output?.match(HERMES_RESULT_RE);
+        if (!match) {
+          throw new Error(
+            "Hermes ACP did not return a verifiable compression result",
+          );
+        }
+        const [, oldMessages, newMessages, oldTokens, newTokens] = match;
+        const oldMessageCount = Number(oldMessages.replaceAll(",", ""));
+        const newMessageCount = Number(newMessages.replaceAll(",", ""));
+        const oldTokenCount = Number(oldTokens.replaceAll(",", ""));
+        const newTokenCount = Number(newTokens.replaceAll(",", ""));
+        if (
+          newMessageCount >= oldMessageCount ||
+          newTokenCount >= oldTokenCount
+        ) {
+          throw new Error(
+            `Hermes ACP /compress was a no-op (${oldMessages} -> ${newMessages} messages; ~${oldTokens} -> ~${newTokens} tokens)`,
+          );
+        }
+        bb.log.info(
+          `Auto-compact: Hermes compressed thread ${threadId}: ${oldMessages} -> ${newMessages} messages; ~${oldTokens} -> ~${newTokens} tokens.`,
+        );
+      };
+      if (waitForVerification) {
+        await verify();
+      } else {
+        void verify().catch((error: unknown) => {
+          bb.log.warn(
+            `Auto-compact: Hermes compression verification failed for thread ${threadId}: ${errorMessage(error)}`,
+          );
+        });
+      }
+      return;
+    }
+    await bb.sdk.threads.compact({ threadId });
+  }
+
+  async function resolveProviderId(
+    threadId: string,
+  ): Promise<string | null | undefined> {
+    try {
+      return (await bb.sdk.threads.get({ threadId })).providerId;
+    } catch (error) {
+      // Older BB test hosts and SDK shims may not expose threads.get. Native
+      // compaction remains the safe fallback in that case.
+      bb.log.debug?.(
+        `Auto-compact: could not resolve provider for ${threadId}: ${errorMessage(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  async function checkThread(
+    threadId: string,
+    trigger: string,
+    providerId?: string | null,
+  ): Promise<string> {
     if (!cached.enabled) return "skipped: auto-compact is disabled";
     if (inFlight.has(threadId)) {
       return "skipped: compaction already in progress";
@@ -146,7 +242,11 @@ export default async function plugin(bb: BbPluginApi) {
     }
     inFlight.add(threadId);
     try {
-      await bb.sdk.threads.compact({ threadId });
+      const resolvedProviderId =
+        providerId === undefined
+          ? await resolveProviderId(threadId)
+          : providerId;
+      await compactThread(threadId, resolvedProviderId);
     } catch (error) {
       if (isUnsupportedCompaction(error)) {
         await bb.storage.kv.set(
@@ -175,15 +275,23 @@ export default async function plugin(bb: BbPluginApi) {
     return `compacted at ${percent.toFixed(1)}%`;
   }
 
-  function onSettled(threadId: string, trigger: string): void {
-    void checkThread(threadId, trigger).catch((error: unknown) => {
+  function onSettled(
+    threadId: string,
+    trigger: string,
+    providerId: string | null | undefined,
+  ): void {
+    void checkThread(threadId, trigger, providerId).catch((error: unknown) => {
       bb.log.warn(
         `Auto-compact: check failed for thread ${threadId}: ${errorMessage(error)}`,
       );
     });
   }
-  bb.events.on("thread.idle", ({ thread }) => onSettled(thread.id, "idle"));
-  bb.events.on("thread.failed", ({ thread }) => onSettled(thread.id, "failed"));
+  bb.events.on("thread.idle", ({ thread }) =>
+    onSettled(thread.id, "idle", thread.providerId),
+  );
+  bb.events.on("thread.failed", ({ thread }) =>
+    onSettled(thread.id, "failed", thread.providerId),
+  );
 
   // Manual compaction: explicit user intent, so it bypasses the threshold
   // and cooldown. Still guards against overlapping compactions, and records
@@ -194,7 +302,16 @@ export default async function plugin(bb: BbPluginApi) {
     }
     inFlight.add(threadId);
     try {
-      await bb.sdk.threads.compact({ threadId });
+      const providerId = await resolveProviderId(threadId);
+      const isHermes = isHermesProvider(providerId);
+      await compactThread(threadId, providerId, !isHermes);
+      if (isHermes) {
+        await bb.storage.kv.set(
+          `${LAST_COMPACT_KV_PREFIX}${threadId}`,
+          Date.now(),
+        );
+        return "started: Hermes /compress queued; verification pending";
+      }
     } catch (error) {
       if (isUnsupportedCompaction(error)) {
         await bb.storage.kv.set(
