@@ -3,13 +3,9 @@
 Automatically compacts a thread's context window when usage reaches a
 configurable percentage (default 80%).
 
-Hermes ACP support is provider-aware: Hermes threads receive the documented
-`/compress` command through the existing ACP session. Manual requests return
-immediately and verify asynchronously, while automatic idle/failed checks wait
-for the turn to become idle and verify Hermes' explicit compression result.
-BB may still display the original timeline size because ACP compression is
-provider-owned. Other providers continue to use BB's native `threads.compact`
-API.
+Hermes ACP is explicitly skipped: Hermes' `/compress` command only changes
+Hermes' internal provider context, while BB continues to display the full BB
+transcript. Other providers continue to use BB's native `threads.compact` API.
 
 - `server.ts` — the backend: `thread.idle` / `thread.failed` handlers that
   read `contextWindowUsage` from the thread timeline and compact at or above

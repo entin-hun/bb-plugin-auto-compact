@@ -15,9 +15,6 @@ const COOLDOWN_MS = 15 * 60_000;
 const LAST_COMPACT_KV_PREFIX = "last-compact:";
 const UNSUPPORTED_KV_PREFIX = "unsupported-compact:";
 const HERMES_PROVIDER_ID = "acp-hermes-agent";
-const HERMES_COMPRESSION_TIMEOUT_MS = 30_000;
-const HERMES_RESULT_RE =
-  /Context compressed:\s*([\d,]+)\s*->\s*([\d,]+) messages[\s\S]*?~([\d,]+)\s*->\s*~([\d,]+) tokens/i;
 
 /** Percentage of `window` consumed by `used`, or null when unmeasurable. */
 export function usagePercent(
@@ -125,70 +122,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function compactThread(
     threadId: string,
-    providerId: string | null | undefined,
-    waitForVerification = true,
   ): Promise<void> {
-    if (isHermesProvider(providerId)) {
-      // Hermes exposes compression as the `/compress` command inside its ACP
-      // session. Keep this agent-only so the command is not shown as a user
-      // message in the BB transcript.
-      await bb.sdk.threads.send({
-        threadId,
-        mode: "auto",
-        input: [
-          {
-            type: "text",
-            text: "/compress",
-            mentions: [],
-            visibility: "agent-only",
-          },
-        ],
-      });
-
-      const verify = async (): Promise<void> => {
-        // `threads.send` only acknowledges dispatch. Wait for Hermes to finish
-        // the command, then verify Hermes' explicit compression result. BB's
-        // timeline may retain the original transcript size for ACP sessions.
-        await bb.sdk.threads.wait({
-          threadId,
-          status: "idle",
-          timeoutMs: HERMES_COMPRESSION_TIMEOUT_MS,
-        });
-        const { output } = await bb.sdk.threads.output({ threadId });
-        const match = output?.match(HERMES_RESULT_RE);
-        if (!match) {
-          throw new Error(
-            "Hermes ACP did not return a verifiable compression result",
-          );
-        }
-        const [, oldMessages, newMessages, oldTokens, newTokens] = match;
-        const oldMessageCount = Number(oldMessages.replaceAll(",", ""));
-        const newMessageCount = Number(newMessages.replaceAll(",", ""));
-        const oldTokenCount = Number(oldTokens.replaceAll(",", ""));
-        const newTokenCount = Number(newTokens.replaceAll(",", ""));
-        if (
-          newMessageCount >= oldMessageCount ||
-          newTokenCount >= oldTokenCount
-        ) {
-          throw new Error(
-            `Hermes ACP /compress was a no-op (${oldMessages} -> ${newMessages} messages; ~${oldTokens} -> ~${newTokens} tokens)`,
-          );
-        }
-        bb.log.info(
-          `Auto-compact: Hermes compressed thread ${threadId}: ${oldMessages} -> ${newMessages} messages; ~${oldTokens} -> ~${newTokens} tokens.`,
-        );
-      };
-      if (waitForVerification) {
-        await verify();
-      } else {
-        void verify().catch((error: unknown) => {
-          bb.log.warn(
-            `Auto-compact: Hermes compression verification failed for thread ${threadId}: ${errorMessage(error)}`,
-          );
-        });
-      }
-      return;
-    }
     await bb.sdk.threads.compact({ threadId });
   }
 
@@ -216,6 +150,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (inFlight.has(threadId)) {
       return "skipped: compaction already in progress";
     }
+    const resolvedProviderId =
+      providerId === undefined
+        ? await resolveProviderId(threadId)
+        : providerId;
+    if (isHermesProvider(resolvedProviderId)) {
+      return "skipped: Hermes ACP compression does not shrink the BB transcript";
+    }
     const threshold = Number(cached.thresholdPercent);
     const unsupportedAt = await bb.storage.kv.get<number>(
       `${UNSUPPORTED_KV_PREFIX}${threadId}`,
@@ -242,11 +183,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     inFlight.add(threadId);
     try {
-      const resolvedProviderId =
-        providerId === undefined
-          ? await resolveProviderId(threadId)
-          : providerId;
-      await compactThread(threadId, resolvedProviderId);
+      await compactThread(threadId);
     } catch (error) {
       if (isUnsupportedCompaction(error)) {
         await bb.storage.kv.set(
@@ -303,15 +240,10 @@ export default async function plugin(bb: BbPluginApi) {
     inFlight.add(threadId);
     try {
       const providerId = await resolveProviderId(threadId);
-      const isHermes = isHermesProvider(providerId);
-      await compactThread(threadId, providerId, !isHermes);
-      if (isHermes) {
-        await bb.storage.kv.set(
-          `${LAST_COMPACT_KV_PREFIX}${threadId}`,
-          Date.now(),
-        );
-        return "started: Hermes /compress queued; verification pending";
+      if (isHermesProvider(providerId)) {
+        return "unsupported: Hermes ACP compression does not shrink the BB transcript";
       }
+      await compactThread(threadId);
     } catch (error) {
       if (isUnsupportedCompaction(error)) {
         await bb.storage.kv.set(

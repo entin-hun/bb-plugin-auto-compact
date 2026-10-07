@@ -12,11 +12,9 @@ automatically once usage reaches a configurable percentage (default 80%).
 
 - When a thread goes idle or fails, the plugin reads its `contextWindowUsage`
   (used tokens vs. model window) and compacts if usage is at or above the
-  threshold. Hermes ACP threads receive Hermes' `/compress` command through
-  the ACP session; other providers use BB's native `threads.compact` API.
-- Hermes verification parses the explicit `Context compressed: old -> new`
-  response and rejects a no-op. BB may still show the original transcript
-  size because ACP compression is owned by the provider.
+  threshold. Hermes ACP threads are skipped because Hermes' internal
+  `/compress` does not shrink BB's transcript; other providers use BB's native
+  `threads.compact` API.
 - A 15-minute per-thread cooldown prevents repeated compactions when usage
   stays high.
 - Compaction only ever runs on idle or failed threads, which is when BB
@@ -37,9 +35,7 @@ bb auto-compact now [thread-id] [--json]
   over threshold. Use it to verify behavior instead of waiting for a thread
   to go idle.
 - `now` compacts immediately, bypassing threshold and cooldown. Same action
-  as the thread header's Compact button. For Hermes ACP, it queues `/compress`
-  and returns immediately; verification continues in the background so a
-  remote BB request is not held open while Hermes finishes its turn.
+  as the thread header's Compact button. Hermes ACP reports unsupported.
 
 ## Manual compaction
 
@@ -56,8 +52,8 @@ Some providers cannot compact at all (certain ACP bridges fail with
 "<provider> does not support manual compaction"). On those threads the
 Compact button says the provider doesn't support compaction, and automatic
 checks skip quietly instead of retrying on every idle event. Hermes ACP is
-supported by sending its documented `/compress` command into the existing
-session.
+reported as unsupported because its documented `/compress` command does not
+rewrite the BB transcript or reduce BB's displayed context usage.
 
 ## Settings
 

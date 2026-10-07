@@ -218,7 +218,7 @@ describe("providers without compaction support", () => {
 });
 
 describe("manual compaction", () => {
-  it("uses Hermes ACP's /compress command", async () => {
+  it("does not claim Hermes ACP can compact the BB transcript", async () => {
     const sendInputs: unknown[] = [];
     let usedTokens = 10_000;
     const { bb, harness } = createFakePluginHost({
@@ -249,16 +249,10 @@ describe("manual compaction", () => {
       threadId: THREAD_ID,
     });
     expect(result).toEqual({
-      result: "started: Hermes /compress queued; verification pending",
+      result:
+        "unsupported: Hermes ACP compression does not shrink the BB transcript",
     });
-    expect(sendInputs).toEqual([
-      {
-        type: "text",
-        text: "/compress",
-        mentions: [],
-        visibility: "agent-only",
-      },
-    ]);
+    expect(sendInputs).toEqual([]);
     await harness.lifecycle.dispose();
   });
 
