@@ -12,9 +12,9 @@ automatically once usage reaches a configurable percentage (default 80%).
 
 - When a thread goes idle or fails, the plugin reads its `contextWindowUsage`
   (used tokens vs. model window) and compacts if usage is at or above the
-  threshold. Hermes ACP threads are skipped because Hermes' internal
-  `/compress` does not shrink BB's transcript; other providers use BB's native
-  `threads.compact` API.
+  threshold. Hermes ACP threads are skipped by automatic checks because
+  Hermes' internal `/compress` does not shrink BB's transcript; other providers
+  use BB's native `threads.compact` API.
 - A 15-minute per-thread cooldown prevents repeated compactions when usage
   stays high.
 - Compaction only ever runs on idle or failed threads, which is when BB
@@ -26,6 +26,7 @@ automatically once usage reaches a configurable percentage (default 80%).
 bb auto-compact status [--json]
 bb auto-compact check [thread-id] [--json]
 bb auto-compact now [thread-id] [--json]
+bb auto-compact compact-hermes <thread-id> [--archive] [--json]
 ```
 
 - `status` prints whether auto-compact is enabled, the threshold percent,
@@ -34,8 +35,12 @@ bb auto-compact now [thread-id] [--json]
   (defaults to the current thread when run inside one) and compacts it when
   over threshold. Use it to verify behavior instead of waiting for a thread
   to go idle.
-- `now` compacts immediately, bypassing threshold and cooldown. Same action
-  as the thread header's Compact button. Hermes ACP reports unsupported.
+- `now` compacts immediately, bypassing threshold and cooldown. On Hermes it
+  creates a bounded successor thread and preserves the source thread.
+- `compact-hermes` performs the Hermes successor operation explicitly. It
+  reads a bounded prompt history and latest output, creates a new Hermes thread
+  with a deterministic continuation seed, and leaves the source intact unless
+  `--archive` is supplied. It does not claim to rewrite the old BB transcript.
 
 ## Manual compaction
 
@@ -48,12 +53,13 @@ compaction runs.
 
 ## Limitations
 
-Some providers cannot compact at all (certain ACP bridges fail with
+Some providers cannot compact in place (certain ACP bridges fail with
 "<provider> does not support manual compaction"). On those threads the
 Compact button says the provider doesn't support compaction, and automatic
 checks skip quietly instead of retrying on every idle event. Hermes ACP is
-reported as unsupported because its documented `/compress` command does not
-rewrite the BB transcript or reduce BB's displayed context usage.
+  automatically skipped because its documented `/compress` command does not
+  rewrite the BB transcript or reduce BB's displayed context usage. Use the
+  successor operation when an actually smaller BB context is required.
 
 ## Settings
 

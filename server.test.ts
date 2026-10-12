@@ -3,7 +3,7 @@ import {
   createFakePluginHost,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import plugin, { usagePercent } from "./server";
+import plugin, { buildHermesSuccessorSeed, usagePercent } from "./server";
 
 const THREAD_ID = "thr_test1";
 
@@ -218,29 +218,30 @@ describe("providers without compaction support", () => {
 });
 
 describe("manual compaction", () => {
-  it("does not claim Hermes ACP can compact the BB transcript", async () => {
-    const sendInputs: unknown[] = [];
-    let usedTokens = 10_000;
+  it("materializes a bounded Hermes successor instead of lying about in-place compaction", async () => {
+    const spawnCalls: unknown[] = [];
     const { bb, harness } = createFakePluginHost({
       pluginId: "auto-compact",
       sdk: {
         threads: {
-          timeline: async () => timelineWith(usedTokens, 200_000),
-          get: async () => ({ providerId: "acp-hermes-agent" }),
-          send: async (args: { input: unknown[] }) => {
-            sendInputs.push(...args.input);
-            usedTokens = 1_000;
-            return { ok: true as const, delivery: "sent" as const };
+          get: async () => ({
+            id: THREAD_ID,
+            projectId: "proj_test",
+            environmentId: "env_test",
+            providerId: "acp-hermes-agent",
+            runtime: { displayStatus: "idle", hostReconnectGraceExpiresAt: null },
+            title: "Long Hermes task",
+            visibility: "visible",
+          }),
+          promptHistory: async () => [
+            { id: "p1", createdAt: 1, input: [{ type: "text", text: "Inspect the service" }] },
+            { id: "p2", createdAt: 2, input: [{ type: "text", text: "Now fix the timeout" }] },
+          ],
+          output: async () => ({ output: "The timeout is in the retry loop." }),
+          spawn: async (args: unknown) => {
+            spawnCalls.push(args);
+            return { id: "thr_successor" };
           },
-          wait: async () => ({
-            matched: true as const,
-            threadId: THREAD_ID,
-            target: { kind: "status" as const, status: "idle" as const },
-            thread: { providerId: "acp-hermes-agent" },
-          }),
-          output: async () => ({
-            output: "Context compressed: 10 -> 3 messages\n~10,000 -> ~1,000 tokens",
-          }),
         },
       },
     });
@@ -249,11 +250,25 @@ describe("manual compaction", () => {
       threadId: THREAD_ID,
     });
     expect(result).toEqual({
-      result:
-        "unsupported: Hermes ACP compression does not shrink the BB transcript",
+      result: expect.stringContaining("compacted into successor thr_successor"),
     });
-    expect(sendInputs).toEqual([]);
+    expect(spawnCalls).toHaveLength(1);
+    expect((spawnCalls[0] as { input: { text: string }[] }).input[0]!.text)
+      .toContain("# Compacted Hermes continuation");
     await harness.lifecycle.dispose();
+  });
+
+  it("keeps the successor seed bounded for oversized histories", () => {
+    const seed = buildHermesSuccessorSeed({
+      sourceThreadId: THREAD_ID,
+      providerId: "acp-hermes-agent",
+      prompts: Array.from({ length: 200 }, (_, index) => ({
+        input: [{ type: "text", text: `prompt ${index} ${"x".repeat(10_000)}` }],
+      })),
+      latestOutput: "y".repeat(50_000),
+    });
+    expect(seed.length).toBeLessThanOrEqual(24_000);
+    expect(seed).toContain("earlier prompts elided");
   });
 
   it("compact_now RPC compacts regardless of threshold", async () => {
