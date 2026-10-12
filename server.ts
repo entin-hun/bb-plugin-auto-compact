@@ -16,8 +16,8 @@ const COOLDOWN_MS = 15 * 60_000;
 const LAST_COMPACT_KV_PREFIX = "last-compact:";
 const UNSUPPORTED_KV_PREFIX = "unsupported-compact:";
 const HERMES_PROVIDER_ID = "acp-hermes-agent";
-const HERMES_SUCCESSOR_MAX_CHARS = 24_000;
-const HERMES_PROMPT_LIMIT = 200;
+const HERMES_SUCCESSOR_MAX_CHARS = 48_000;
+const HERMES_PROMPT_LIMIT = 1_000;
 
 /** Percentage of `window` consumed by `used`, or null when unmeasurable. */
 export function usagePercent(
@@ -81,30 +81,49 @@ function clip(text: string, maxChars: number): string {
 export function buildHermesSuccessorSeed(args: {
   sourceThreadId: string;
   providerId: string;
-  prompts: readonly { input?: unknown }[];
+  prompts: readonly { id?: string; createdAt?: number; input?: unknown }[];
   latestOutput?: string | null;
 }): string {
+  // BB returns prompt history newest-first. A successor must present the
+  // parent conversation chronologically, otherwise Hermes treats the newest
+  // request as an unrelated opening task. Keep the identifiers/timestamps so
+  // the snapshot is recognisably the parent's prompt manifest as well.
   const prompts = args.prompts
-    .map((entry) => inputText(entry.input))
-    .filter(Boolean);
-  const selected = prompts.length <= 10
+    .map((entry) => ({
+      id: entry.id,
+      createdAt: entry.createdAt,
+      text: inputText(entry.input),
+    }))
+    .filter((entry) => entry.text)
+    .sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
+  const selected: Array<{ id?: string; createdAt?: number; text: string }> = prompts.length <= 40
     ? prompts
-    : [...prompts.slice(0, 2), "[… earlier prompts elided …]", ...prompts.slice(-8)];
-  const promptBudget = Math.max(2_000, HERMES_SUCCESSOR_MAX_CHARS - 8_000);
+    : [
+        ...prompts.slice(0, 8),
+        { text: "[… middle parent prompts elided; see source thread for the full manifest …]" },
+        ...prompts.slice(-31),
+      ];
+  const promptBudget = Math.max(4_000, HERMES_SUCCESSOR_MAX_CHARS - 12_000);
   const promptText = clip(
-    selected.map((text, index) => `Prompt ${index + 1}:\n${clip(text, 2_000)}`).join("\n\n"),
+    selected.map((entry, index) => {
+      const metadata = [
+        entry.id ? `id=${entry.id}` : null,
+        entry.createdAt ? `createdAt=${entry.createdAt}` : null,
+      ].filter(Boolean).join(", ");
+      return `Parent prompt ${index + 1}${metadata ? ` (${metadata})` : ""}:\n${clip(entry.text, 1_500)}`;
+    }).join("\n\n"),
     promptBudget,
   );
-  const output = clip(args.latestOutput ?? "", 7_000);
+  const output = clip(args.latestOutput ?? "", 10_000);
   return clip(
     [
       "# Compacted Hermes continuation",
       `Original BB thread: ${args.sourceThreadId}`,
       `Provider: ${args.providerId}`,
       "",
-      "This is a deterministic continuation seed created by BB. The original thread was preserved separately; do not assume omitted tool output or hidden reasoning is present here.",
+      "This is the parent thread's compacted context snapshot, injected as agent-only context by BB. Treat the parent prompts below as the authoritative task history. The original thread was preserved separately; do not assume omitted tool output or hidden reasoning is present here.",
       "",
-      promptText ? `Recent user prompts:\n${promptText}` : "Recent user prompts: unavailable",
+      promptText ? `Parent prompt manifest (chronological excerpts):\n${promptText}` : "Parent prompt manifest: unavailable",
       "",
       output ? `Latest assistant output:\n${output}` : "Latest assistant output: unavailable",
       "",
@@ -241,9 +260,14 @@ export default async function plugin(bb: BbPluginApi) {
       environment: source.environmentId
         ? { type: "reuse", environmentId: source.environmentId }
         : { type: "project-default" },
+      parentThreadId: threadId,
       providerId: source.providerId,
       title: `${source.title ?? "Hermes thread"} [compacted]`,
-      input: [{ type: "text", text: seed, mentions: [] }],
+      input: [{
+        type: "text",
+        text: `${seed}\n\nContinue the parent thread from this compacted context snapshot. Verify omitted details against the workspace and the preserved source thread when needed.`,
+        mentions: [],
+      }],
       visibility: source.visibility,
     });
     if (archiveSource) await bb.sdk.threads.archive({ threadId });

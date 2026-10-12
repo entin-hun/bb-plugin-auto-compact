@@ -253,8 +253,12 @@ describe("manual compaction", () => {
       result: expect.stringContaining("compacted into successor thr_successor"),
     });
     expect(spawnCalls).toHaveLength(1);
+    expect((spawnCalls[0] as { parentThreadId: string }).parentThreadId)
+      .toBe(THREAD_ID);
     expect((spawnCalls[0] as { input: { text: string }[] }).input[0]!.text)
-      .toContain("# Compacted Hermes continuation");
+      .toContain("Parent prompt manifest");
+    expect((spawnCalls[0] as { input: { text: string }[] }).input[0]!.text)
+      .toContain("Continue the parent thread");
     await harness.lifecycle.dispose();
   });
 
@@ -267,8 +271,9 @@ describe("manual compaction", () => {
       })),
       latestOutput: "y".repeat(50_000),
     });
-    expect(seed.length).toBeLessThanOrEqual(24_000);
-    expect(seed).toContain("earlier prompts elided");
+    expect(seed.length).toBeLessThanOrEqual(48_000);
+    expect(seed).toContain("middle parent prompts elided");
+    expect(seed).toContain("prompt 0");
   });
 
   it("compact_now RPC compacts regardless of threshold", async () => {
