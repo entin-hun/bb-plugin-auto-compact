@@ -173,6 +173,13 @@ export default async function plugin(bb: BbPluginApi) {
       options: ["70", "75", "80", "85", "90", "95"],
       default: "80",
     },
+    hermesAutoSuccessor: {
+      type: "boolean",
+      label: "Auto-create Hermes successors",
+      description:
+        "When on, an idle or failed Hermes ACP thread over the threshold gets a bounded successor; the source stays preserved.",
+      default: false,
+    },
   });
   let cached = await settings.get();
   settings.onChange((next) => {
@@ -287,7 +294,8 @@ export default async function plugin(bb: BbPluginApi) {
       providerId === undefined
         ? await resolveProviderId(threadId)
         : providerId;
-    if (isHermesProvider(resolvedProviderId)) {
+    const hermes = isHermesProvider(resolvedProviderId);
+    if (hermes && !cached.hermesAutoSuccessor) {
       return "skipped: Hermes ACP compression does not shrink the BB transcript";
     }
     const threshold = Number(cached.thresholdPercent);
@@ -316,6 +324,17 @@ export default async function plugin(bb: BbPluginApi) {
     }
     inFlight.add(threadId);
     try {
+      if (hermes) {
+        const successor = await materializeHermesSuccessor(threadId, false);
+        await bb.storage.kv.set(
+          `${LAST_COMPACT_KV_PREFIX}${threadId}`,
+          Date.now(),
+        );
+        bb.log.info(
+          `Auto-compacted Hermes thread ${threadId} into successor ${successor.successorThreadId} at ${percent.toFixed(1)}% of context window (${trigger}, threshold ${threshold}%).`,
+        );
+        return `compacted into successor ${successor.successorThreadId} at ${percent.toFixed(1)}%`;
+      }
       await compactThread(threadId);
     } catch (error) {
       if (isUnsupportedCompaction(error)) {
@@ -455,13 +474,14 @@ export default async function plugin(bb: BbPluginApi) {
           const value = {
             enabled: cached.enabled,
             thresholdPercent: Number(cached.thresholdPercent),
+            hermesAutoSuccessor: cached.hermesAutoSuccessor,
             cooldownMinutes: COOLDOWN_MS / 60_000,
           };
           return {
             exitCode: 0,
             stdout: json
               ? JSON.stringify(value)
-              : `enabled: ${value.enabled}\nthreshold: ${value.thresholdPercent}%\ncooldown: ${value.cooldownMinutes} min`,
+              : `enabled: ${value.enabled}\nthreshold: ${value.thresholdPercent}%\nhermes auto-successor: ${value.hermesAutoSuccessor}\ncooldown: ${value.cooldownMinutes} min`,
           };
         }
         case "check": {

@@ -70,6 +70,42 @@ describe("usagePercent", () => {
 });
 
 describe("auto-compact on thread events", () => {
+  it("can automatically create a preserved Hermes successor at the threshold", async () => {
+    const spawnCalls: unknown[] = [];
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "auto-compact",
+      sdk: {
+        threads: {
+          timeline: async () => timelineWith(180_000, 200_000),
+          get: async () => ({
+            id: THREAD_ID,
+            projectId: "proj_test",
+            environmentId: "env_test",
+            providerId: "acp-hermes-agent",
+            runtime: { displayStatus: "idle", hostReconnectGraceExpiresAt: null },
+            title: "Hermes task",
+            visibility: "visible",
+          }),
+          promptHistory: async () => [
+            { id: "p1", createdAt: 1, input: [{ type: "text", text: "Keep working" }] },
+          ],
+          output: async () => ({ output: "Current state" }),
+          spawn: async (args: unknown) => {
+            spawnCalls.push(args);
+            return { id: "thr_hermes_successor" };
+          },
+        },
+      },
+    });
+    await plugin(bb);
+    await harness.behavior.setSettings({ hermesAutoSuccessor: true });
+    const result = await harness.behavior.runCli(["check", THREAD_ID]);
+    expect(result.stdout).toContain("compacted into successor thr_hermes_successor");
+    expect(spawnCalls).toHaveLength(1);
+    expect((spawnCalls[0] as { parentThreadId: string }).parentThreadId).toBe(THREAD_ID);
+    await harness.lifecycle.dispose();
+  });
+
   it("compacts an idle thread at or above the threshold", async () => {
     const { harness, compactCalls } = await loadHost(170_000);
     await harness.behavior.emitThreadEvent("thread.idle", {
@@ -326,6 +362,7 @@ describe("auto-compact CLI", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       enabled: true,
       thresholdPercent: 80,
+      hermesAutoSuccessor: false,
     });
     await harness.lifecycle.dispose();
   });

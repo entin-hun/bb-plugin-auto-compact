@@ -19,6 +19,10 @@ automatically once usage reaches a configurable percentage (default 80%).
   stays high.
 - Compaction only ever runs on idle or failed threads, which is when BB
   allows it. Active threads are never interrupted.
+- Hermes ACP threads are opt-in for automatic successor creation. Enable
+  `hermesAutoSuccessor` when you want an over-threshold idle/failed Hermes
+  thread to be replaced by a bounded successor automatically; the source is
+  preserved.
 
 ## CLI
 
@@ -73,3 +77,30 @@ bb plugin config auto-compact set thresholdPercent 90
 - `enabled` (boolean, default `true`) — master switch.
 - `thresholdPercent` (one of 70, 75, 80, 85, 90, 95; default `80`) —
   context usage percent that triggers compaction.
+- `hermesAutoSuccessor` (boolean, default `false`) — automatically create a
+  bounded Hermes successor at the threshold. This is a BB transcript
+  handoff, not Hermes' internal `/compress` operation.
+
+## Hermes-native optimization
+
+The Hermes auxiliary model and micro-compaction settings are read by Hermes
+from its own `config.yaml`; this plugin cannot safely rewrite that provider
+configuration. For a low-cost, low-stall setup, configure Hermes itself with
+an auxiliary compression model whose context window is large enough for the
+primary model, and optionally enable:
+
+```yaml
+compression:
+  enabled: true
+  threshold: 0.75
+  micro_compact: true
+  micro_compact_every_n_turns: 5
+  auxiliary:
+    compression:
+      model: deepseek/deepseek-v4-flash
+```
+
+Micro-compaction trades more frequent cache breaks for smaller, steadier
+contexts. Keep it disabled when prefix-cache savings matter more than latency.
+Warm-compaction context engines are likewise Hermes-native and must be
+installed and selected in Hermes; BB cannot activate them through this plugin.
